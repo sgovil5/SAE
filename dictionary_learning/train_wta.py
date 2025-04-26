@@ -13,7 +13,7 @@ RANDOM_SEED = 42
 MODEL_NAME = "EleutherAI/pythia-410m-deduped"
 LAYER = 3
 DATASET_NAME = "monology/pile-uncopyrighted"
-SAVE_DIR = "./wta_sae_model"
+
 
 # Set random seeds for reproducibility
 random.seed(RANDOM_SEED)
@@ -32,11 +32,13 @@ num_tokens = 100_000_000
 
 # SAE parameters
 expansion_factor = 8
-sparsity_rate = 0.000005
+sparsity_rate = 0.000001
 steps = int(num_tokens / sae_batch_size)  # Total number of batches to train
 warmup_steps = 1000
 decay_start = None
 auxk_alpha = 1 / 32
+
+SAVE_DIR = f"./wta_sae_model_{sparsity_rate}"
 
 # Get model dimensions
 submodule = model.gpt_neox.layers[LAYER]

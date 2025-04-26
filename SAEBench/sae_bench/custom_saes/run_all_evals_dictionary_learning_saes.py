@@ -73,66 +73,66 @@ TRAINER_LOADERS = {
 }
 
 
-def get_all_hf_repo_autoencoders(
-    repo_id: str, download_location: str = "downloaded_saes"
-) -> list[str]:
-    download_location = os.path.join(download_location, repo_id.replace("/", "_"))
-    config_dir = snapshot_download(
-        repo_id,
-        allow_patterns=["*config.json"],
-        local_dir=download_location,
-        force_download=False,
-    )
+def get_all_local_autoencoders(local_sae_parent_dir: str) -> list[str]:
+    """
+    Finds all subdirectories within the local_sae_parent_dir that contain a config.json file.
+    Returns a list of relative paths to these subdirectories.
+    """
+    sae_locations = []
+    if not os.path.isdir(local_sae_parent_dir):
+        print(f"Warning: Local SAE directory not found: {local_sae_parent_dir}")
+        return []
 
-    config_locations = []
+    # Walk through the directory
+    for root, dirs, files in os.walk(local_sae_parent_dir):
+        # Check if config.json exists in the current directory
+        if "config.json" in files and "ae.pt" in files:
+            # Calculate the relative path from the parent directory
+            relative_path = os.path.relpath(root, local_sae_parent_dir)
+            # Handle the case where the SAE is directly in the parent directory
+            if relative_path == ".":
+                 # Check if the parent dir itself contains config.json and ae.pt
+                 # This case is less common for multiple SAEs but possible.
+                 # We usually expect SAEs in subdirectories.
+                 # Let's assume SAEs are always in subdirectories for now.
+                 # If config.json is in the root, it might be a single SAE run?
+                 # For consistency, let's focus on subdirs.
+                 pass
+            else:
+                 # Check if it's a direct subdirectory containing the config
+                 # Avoids adding intermediate directories if structure is nested deeper
+                 if os.path.exists(os.path.join(local_sae_parent_dir, relative_path, "config.json")):
+                     sae_locations.append(relative_path)
+            # Prevent os.walk from going deeper into already found SAE directories
+            dirs[:] = [d for d in dirs if os.path.relpath(os.path.join(root, d), local_sae_parent_dir) not in sae_locations]
 
-    for root, _, files in os.walk(config_dir):
-        for file in files:
-            if file == "config.json":
-                config_locations.append(os.path.join(root, file))
 
-    # Print for debugging
-    print(f"Found config locations: {config_locations}")
-    
-    repo_locations = []
-
-    for config in config_locations:
-        # Extract the relative path from the download location
-        rel_path = os.path.relpath(os.path.dirname(config), download_location)
-        
-        # If the config is in the root directory, use empty string
-        if rel_path == ".":
-            repo_locations.append("")
-        else:
-            repo_locations.append(rel_path)
-    
-    # Print for debugging
-    print(f"Extracted repo locations: {repo_locations}")
-    
-    return repo_locations
+    # Deduplicate in case of unusual structures, though the logic above tries to avoid it
+    sae_locations = sorted(list(set(sae_locations)))
+    print(f"Found local SAE locations relative to {local_sae_parent_dir}: {sae_locations}")
+    return sae_locations
 
 
 def load_dictionary_learning_sae(
-    repo_id: str,
+    local_sae_parent_dir: str,
     location: str,
-    model_name,
+    model_name: str,
     device: str,
     dtype: torch.dtype,
     layer: int | None = None,
-    download_location: str = "downloaded_saes",
 ) -> base_sae.BaseSAE:
-    download_location = os.path.join(download_location, repo_id.replace("/", "_"))
+    sae_dir = os.path.join(local_sae_parent_dir, location)
+    config_file = os.path.join(sae_dir, "config.json")
+    ae_file = os.path.join(sae_dir, "ae.pt")
     
-    # Fix: Handle the case where location is empty (root directory)
-    if location == "":
-        config_file = os.path.join(download_location, "config.json")
-        ae_path = "ae.pt"
-    else:
-        config_file = os.path.join(download_location, location, "config.json")
-        ae_path = os.path.join(location, "ae.pt")
-    
+    if not os.path.exists(config_file):
+        raise FileNotFoundError(f"Config file not found at: {config_file}")
+    if not os.path.exists(ae_file):
+        raise FileNotFoundError(f"SAE checkpoint file not found at: {ae_file}")
+
     # Print for debugging
-    print(f"Looking for config at: {config_file}")
+    print(f"Loading config from: {config_file}")
+    print(f"Loading ae.pt from: {ae_file}")
     
     with open(config_file) as f:
         config = json.load(f)
@@ -141,41 +141,277 @@ def load_dictionary_learning_sae(
     
     # Print for debugging
     print(f"Using trainer class: {trainer_class}")
-    print(f"Loading ae.pt from: {ae_path}")
+    print(f"Loading ae.pt from: {ae_file}")
 
-    sae = TRAINER_LOADERS[trainer_class](
-        repo_id=repo_id,
-        filename=ae_path,
-        layer=layer,
-        model_name=model_name,
-        device=device,
-        dtype=dtype,
-    )
+    # --- Revised Parameter Extraction ---
+    # Function to safely get nested keys, checking 'model', 'trainer', then top-level
+    def get_param(keys_to_try, default=None):
+        # Ensure keys_to_try is a list
+        if isinstance(keys_to_try, str):
+            keys_to_try = [keys_to_try]
+        
+        # Check under 'model' sub-dictionary
+        model_cfg = config.get("model", {})
+        for key_name in keys_to_try:
+            value = model_cfg.get(key_name)
+            if value is not None:
+                print(f"Found parameter '{key_name}' in 'model': {value}")
+                return value
+        
+        # Check under 'trainer' sub-dictionary
+        trainer_cfg = config.get("trainer", {})
+        for key_name in keys_to_try:
+            value = trainer_cfg.get(key_name)
+            if value is not None:
+                print(f"Found parameter '{key_name}' in 'trainer': {value}")
+                return value
+
+        # Check under 'buffer' sub-dictionary (for d_in specific keys)
+        buffer_cfg = config.get("buffer", {})
+        for key_name in keys_to_try:
+             if key_name in ["activation_dim", "d_submodule"]: # Only check buffer for these specific keys
+                value = buffer_cfg.get(key_name)
+                if value is not None:
+                    print(f"Found parameter '{key_name}' in 'buffer': {value}")
+                    return value
+
+        # Check at the top level
+        for key_name in keys_to_try:
+            value = config.get(key_name)
+            if value is not None:
+                print(f"Found parameter '{key_name}' at top level: {value}")
+                return value
+                
+        print(f"Parameter not found using keys: {keys_to_try}. Returning default: {default}")
+        return default
+
+    # Define primary and alternative key names
+    d_in_keys = ["d_model", "activation_size", "activation_dim", "d_submodule"]
+    d_sae_keys = ["dict_size"]
+    k_keys = ["k"]
+    l1_coeff_keys = ["l1_coeff", "l1_coefficient"]
+    use_bias_keys = ["use_bias"]
+
+    # Extract parameters using the flexible get_param function
+    d_in = get_param(d_in_keys)
+    if d_in is None:
+        if model_name and model_name in MODEL_CONFIGS:
+             d_in = MODEL_CONFIGS[model_name]['d_model']
+             print(f"Parameter 'd_in' not found in config, using MODEL_CONFIGS fallback: {d_in}")
+        else:
+             raise ValueError(f"Could not determine 'd_in' from config {config_file} or MODEL_CONFIGS fallback.")
+
+    d_sae = get_param(d_sae_keys)
+    if d_sae is None:
+        raise ValueError(f"Could not determine 'd_sae' using keys {d_sae_keys} from config: {config_file}")
+
+    l1_coefficient = get_param(l1_coeff_keys, default=0.0)
+    use_bias = get_param(use_bias_keys, default=True)
+    # --- End Revised Parameter Extraction ---
+
+    print(f"Instantiating SAE for trainer class: {trainer_class}")
+    print(f"Parameters: d_in={d_in}, d_sae={d_sae}, l1_coeff={l1_coefficient}, use_bias={use_bias}, device={device}, dtype={dtype}")
+
+    # Instantiate based on trainer class
+    if trainer_class == "StandardTrainerAprilUpdate" or trainer_class == "StandardTrainer" or trainer_class == "PAnnealTrainer":
+        # Assuming these map to ReluSAE
+        sae = relu_sae.ReluSAE(
+            d_in=d_in,
+            d_sae=d_sae,
+            l1_coefficient=l1_coefficient,
+            dtype=dtype,
+            device=device,
+            # Add other required ReluSAE params if any, e.g., use_bias
+            # use_bias=cfg_dict.get("use_bias", True) 
+            use_bias=use_bias
+        )
+    elif trainer_class == "TopKTrainer":
+        # k = cfg_dict.get("k")
+        k = get_param(k_keys)
+        if k is None:
+             raise ValueError(f"Could not determine 'k' for TopKTrainer from config: {config_file}")
+        print(f"TopK Specific: k={k}")
+        sae = topk_sae.TopKSAE(
+             d_in=d_in,
+             d_sae=d_sae,
+             k=k,
+             l1_coefficient=l1_coefficient, # Check if TopKSAE uses this
+             dtype=dtype,
+             device=device,
+             # use_bias=cfg_dict.get("use_bias", True)
+             use_bias=use_bias
+        )
+    elif trainer_class == "BatchTopKTrainer": # Add BatchTopK logic
+         # k = cfg_dict.get("k")
+         k = get_param(k_keys)
+         if k is None:
+              raise ValueError(f"Could not determine 'k' for BatchTopKTrainer from config: {config_file}")
+         print(f"BatchTopK Specific: k={k}")
+         sae = batch_topk_sae.BatchTopKSAE( # Assuming class name
+              d_in=d_in,
+              d_sae=d_sae,
+              k=k,
+              l1_coefficient=l1_coefficient, # Check if BatchTopKSAE uses this
+              dtype=dtype,
+              device=device,
+              # use_bias=cfg_dict.get("use_bias", True)
+              use_bias=use_bias
+         )
+    elif trainer_class == "JumpReluTrainer":
+         # Add JumpRelu logic - check required params
+         sae = jumprelu_sae.JumpReluSAE( # Assuming class name
+             d_in=d_in,
+             d_sae=d_sae,
+             l1_coefficient=l1_coefficient,
+             dtype=dtype,
+             device=device,
+             # Add other required JumpReluSAE params if any
+             # use_bias=cfg_dict.get("use_bias", True)
+             use_bias=use_bias
+         )
+    elif trainer_class == "GatedSAETrainer":
+         sae = gated_sae.GatedSAE( # Assuming class name
+             d_in=d_in,
+             d_sae=d_sae,
+             l1_coefficient=l1_coefficient,
+             dtype=dtype,
+             device=device,
+             # Add other required GatedSAE params if any
+             # use_bias=cfg_dict.get("use_bias", True)
+             use_bias=use_bias
+         )
+    elif trainer_class == "WTATrainer":
+        # Fetch sparsity_rate instead of k for WTA
+        sparsity_rate_keys = ["sparsity_rate"]
+        sparsity_rate = get_param(sparsity_rate_keys)
+        if sparsity_rate is None:
+            raise ValueError(f"Could not determine 'sparsity_rate' for WTATrainer from config: {config_file}")
+        print(f"WTA Specific: sparsity_rate={sparsity_rate}")
+
+        # Need hook_layer and model_name for WTASAE constructor
+        # These are already passed to load_dictionary_learning_sae, but WTASAE needs them
+        # Let's try to get layer from config first, fall back to MODEL_CONFIGS if needed
+        layer_keys = ["layer"]
+        hook_layer = get_param(layer_keys)
+        if hook_layer is None:
+             # Try to infer from model_name config if possible?
+             # Or should we require it in the config?
+             # For now, let's raise an error if not found in config.
+            raise ValueError(f"Could not determine 'layer' for WTATrainer from config: {config_file}")
+        
+        # model_name is already an argument to the function
+        # Make sure it's the full name expected by WTASAE (potentially from config)
+        lm_name_keys = ["lm_name"]
+        config_lm_name = get_param(lm_name_keys)
+        if config_lm_name is None:
+            print(f"Warning: Could not find 'lm_name' in config {config_file}. Using model_name argument: {model_name}")
+            actual_model_name = model_name # Use the passed model_name
+        else:
+            actual_model_name = config_lm_name # Use the name from config
+
+        sae = wta_sae.WTASAE(
+            d_in=d_in,
+            d_sae=d_sae,
+            sparsity_rate=sparsity_rate, # Pass sparsity_rate
+            model_name=actual_model_name, # Use model name from config or arg
+            hook_layer=hook_layer, # Pass layer from config
+            dtype=dtype,
+            device=device,
+            # WTASAE doesn't take use_bias in its constructor
+            # use_bias=use_bias
+        )
+    # Add elif blocks for MatryoshkaBatchTopKTrainer if needed
+    else:
+        # Fallback or error if trainer_class is unknown
+        # Check if the loader map has a corresponding class we can import?
+        # This requires inspecting the TRAINER_LOADERS functions or the modules they point to.
+        # For now, raise an error.
+        raise NotImplementedError(f"SAE loading not implemented for trainer class: {trainer_class}. Config: {config_file}")
+
+    # Load state dictionary
+    print(f"Loading state dict from: {ae_file}")
+    state_dict = torch.load(ae_file, map_location=device)
+    
+    # Check if the state dict is nested (e.g., under 'model_state_dict')
+    if 'model_state_dict' in state_dict:
+        state_dict = state_dict['model_state_dict']
+    elif 'state_dict' in state_dict: # another common pattern
+        state_dict = state_dict['state_dict']
+
+    # Adjust keys if necessary (e.g., remove "module." prefix if saved with DataParallel)
+    state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+
+    # --- Specific Key Mapping/Transposition for WTATrainer ---
+    if trainer_class == "WTATrainer":
+        print("Applying WTASAE specific key mapping and transposition...")
+        key_mapping = {
+            "encoder.weight": "W_enc",
+            "decoder.weight": "W_dec",
+            "encoder.bias": "b_enc",
+            "b_dec": "b_dec", # Already matches
+            "threshold": "threshold", # Already matches
+        }
+        # Create a new dictionary with renamed keys, keeping others as is
+        renamed_params = {key_mapping.get(k, k): v for k, v in state_dict.items()}
+        
+        # Transpose weights if they exist in the renamed dict
+        if "W_enc" in renamed_params:
+            renamed_params["W_enc"] = renamed_params["W_enc"].T
+        if "W_dec" in renamed_params:
+             renamed_params["W_dec"] = renamed_params["W_dec"].T
+        
+        # Use the renamed parameters for loading
+        final_state_dict = renamed_params
+        print(f"Mapped Checkpoint keys: {final_state_dict.keys()}")
+    else:
+        # For other trainer types, assume keys match or handle specific mappings if needed
+        final_state_dict = state_dict
+        print(f"Using original Checkpoint keys: {final_state_dict.keys()}")
+    # --- End Specific Key Mapping ---
+
+    try:
+        # Load the potentially modified state dict
+        print(f"Attempting to load state_dict into SAE. SAE keys: {sae.state_dict().keys()}")
+        sae.load_state_dict(final_state_dict)
+        print("State dict loaded successfully.")
+    except RuntimeError as e:
+        print(f"Error loading state dict for {ae_file}. Keys might mismatch.")
+
+    sae = sae.to(dtype)
+    sae.eval()
+
     return sae
 
 
 def verify_saes_load(
-    repo_id: str,
+    local_sae_parent_dir: str,
     sae_locations: list[str],
     model_name: str,
     device: str,
     dtype: torch.dtype,
 ):
-    """Verify that all SAEs load correctly. Useful to check this before a big evaluation run."""
+    """Verify that all SAEs load correctly from local paths."""
+    print(f"Verifying SAE loading from: {local_sae_parent_dir}")
     for sae_location in sae_locations:
-        sae = load_dictionary_learning_sae(
-            repo_id=repo_id,
-            location=sae_location,
-            layer=None,
-            model_name=model_name,
-            device=device,
-            dtype=dtype,
-        )
-        del sae
+        print(f"Attempting to load SAE at relative location: {sae_location}")
+        try:
+            sae = load_dictionary_learning_sae(
+                local_sae_parent_dir=local_sae_parent_dir,
+                location=sae_location,
+                layer=None,
+                model_name=model_name,
+                device=device,
+                dtype=dtype,
+            )
+            print(f"Successfully loaded SAE: {sae_location}")
+            del sae
+        except Exception as e:
+             print(f"Failed to load SAE at {sae_location}: {e}")
+             raise e
 
 
 def run_evals(
-    repo_id: str,
+    local_sae_parent_dir: str,
     model_name: str,
     sae_locations: list[str],
     llm_batch_size: int,
@@ -224,10 +460,6 @@ def run_evals(
                 force_rerun,
             )
         ),
-        # TODO: Do a better job of setting num_batches and batch size
-        # The core run_eval() interface isn't well suited for custom SAEs, so we have to do this instead.
-        # It isn't ideal, but it works.
-        # TODO: Don't hardcode magic numbers
         "core": (
             lambda selected_saes, is_final: core.multiple_evals(
                 selected_saes=selected_saes,
@@ -271,7 +503,7 @@ def run_evals(
                 ),
                 selected_saes,
                 device,
-                "eval_results",  # We add scr or tpp depending on perform_scr
+                "eval_results",
                 force_rerun,
                 clean_up_activations=is_final,
                 save_activations=True,
@@ -289,7 +521,7 @@ def run_evals(
                 ),
                 selected_saes,
                 device,
-                "eval_results",  # We add scr or tpp depending on perform_scr
+                "eval_results",
                 force_rerun,
                 clean_up_activations=is_final,
                 save_activations=True,
@@ -318,7 +550,7 @@ def run_evals(
                     random_seed=random_seed,
                     llm_dtype=llm_dtype,
                     llm_batch_size=llm_batch_size
-                    // 8,  # 8x smaller batch size for unlearning due to longer sequences
+                    // 8,
                 ),
                 selected_saes,
                 device,
@@ -333,7 +565,7 @@ def run_evals(
             raise ValueError(f"Unsupported eval type: {eval_type}")
 
     verify_saes_load(
-        repo_id,
+        local_sae_parent_dir,
         sae_locations,
         model_name,
         device,
@@ -363,15 +595,16 @@ def run_evals(
                     is_final = True
 
                 sae = load_dictionary_learning_sae(
-                    repo_id=repo_id,
+                    local_sae_parent_dir=local_sae_parent_dir,
                     location=sae_location,
                     layer=None,
                     model_name=model_name,
                     device=device,
                     dtype=general_utils.str_to_dtype(llm_dtype),
                 )
-                unique_sae_id = sae_location.replace("/", "_")
-                unique_sae_id = f"{repo_id.split('/')[1]}_{unique_sae_id}"
+                safe_location = sae_location.replace(os.path.sep, "_")
+                unique_sae_id = f"{model_name}_{safe_location}"
+                print(f"Generated unique_sae_id: {unique_sae_id}")
                 selected_saes = [(unique_sae_id, sae)]
 
                 os.makedirs(output_folders[eval_type], exist_ok=True)
@@ -386,17 +619,26 @@ def run_evals(
 
 if __name__ == "__main__":
     """
-    This will run all evaluations on all selected dictionary_learning SAEs within the specified HuggingFace repos.
-    Set the model_name(s) and repo_id(s) in `repos`.
+    This will run all evaluations on all selected dictionary_learning SAEs found locally.
+    Specify the parent directory containing the SAE output folders in `local_sae_parent_dir`.
+    Set the model_name corresponding to the SAEs being evaluated in `model_name_to_eval`.
+    Ensure the configuration for `model_name_to_eval` exists in `MODEL_CONFIGS`.
     Also specify the eval types you want to run in `eval_types`.
-    You can also specify any keywords to exclude/include in the SAE filenames using `exclude_keywords` and `include_keywords`.
-    NOTE: If your model (with associated model_name and batch sizes) is not in the MODEL_CONFIGS dictionary, you will need to add it.
-    This relies on each SAE being located in a folder which contains an ae.pt file and a config.json file (which is the default save format in dictionary_learning).
-    Running this script as is should run SAE Bench Pythia and Gemma SAEs.
+    You can also specify any keywords to exclude/include in the SAE folder names using `exclude_keywords` and `include_keywords`.
+    NOTE: This relies on each SAE being located in a folder which contains an ae.pt file and a config.json file.
     """
     RANDOM_SEED = 42
     
-    scratch_dir = "/storage/home/hcoda1/0/sgovil9/scratch"
+    model_name_to_eval = "pythia-410m-deduped"
+
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    sae_bench_dir = os.path.dirname(os.path.dirname(script_dir))
+    workspace_root = os.path.dirname(sae_bench_dir)
+    local_sae_parent_dir = os.path.expanduser("~/scratch/SAE/dictionary_learning")
+
+    print(f"Looking for local SAEs in: {local_sae_parent_dir}")
+    
+    scratch_dir = os.path.expanduser("~/scratch")
     os.makedirs(scratch_dir, exist_ok=True)
     
     hf_cache_dir = os.path.join(scratch_dir, "hf_cache")
@@ -405,29 +647,20 @@ if __name__ == "__main__":
     os.environ["TRANSFORMERS_CACHE"] = os.path.join(hf_cache_dir, "transformers")
     os.environ["HF_DATASETS_CACHE"] = os.path.join(hf_cache_dir, "datasets")
     
-    # Set Weights & Biases cache directory
     wandb_cache_dir = os.path.join(scratch_dir, "wandb")
     os.makedirs(wandb_cache_dir, exist_ok=True)
     os.environ["WANDB_CACHE_DIR"] = wandb_cache_dir
     
-    # Set download location for SAEs
     download_location = os.path.join(scratch_dir, "downloaded_saes")
     os.makedirs(download_location, exist_ok=True)
 
     device = general_utils.setup_environment()
 
-    # Select your eval types here.
-    # Note: Unlearning is not recommended for models with < 2B parameters and we recommend an instruct tuned model
-    # Unlearning will also require requesting permission for the WMDP dataset (see unlearning/README.md)
-    # Absorption not recommended for models < 2B parameters
     eval_types = [
-        # "absorption",
         "core",
         "scr",
         "tpp",
         "sparse_probing",
-        # "autointerp",
-        # "unlearning",
         "ravel",
     ]
 
@@ -448,33 +681,33 @@ if __name__ == "__main__":
                 "Please download bio-forget-corpus.jsonl for unlearning evaluation"
             )
 
-    repos = [
-        (
-            "sgovil5/wtasae",
-            "pythia-410m-deduped",
-        ),
-    ]
-    exclude_keywords = ["checkpoints"]
+    exclude_keywords = ["checkpoints", "old"]
     include_keywords = []
 
-    for repo_id, model_name in repos:
-        print(f"\n\n\nEvaluating {model_name} with {repo_id}\n\n\n")
+    print(f"\n\n\nEvaluating local SAEs for model: {model_name_to_eval}\n\n\n")
 
-        llm_batch_size = MODEL_CONFIGS[model_name]["batch_size"]
-        str_dtype = MODEL_CONFIGS[model_name]["dtype"]
-        torch_dtype = general_utils.str_to_dtype(str_dtype)
+    if model_name_to_eval not in MODEL_CONFIGS:
+        raise ValueError(f"Model '{model_name_to_eval}' not found in MODEL_CONFIGS. Please add its configuration.")
 
-        sae_locations = get_all_hf_repo_autoencoders(repo_id)
+    llm_batch_size = MODEL_CONFIGS[model_name_to_eval]["batch_size"]
+    str_dtype = MODEL_CONFIGS[model_name_to_eval]["dtype"]
+    torch_dtype = general_utils.str_to_dtype(str_dtype)
 
-        sae_locations = general_utils.filter_keywords(
-            sae_locations,
-            exclude_keywords=exclude_keywords,
-            include_keywords=include_keywords,
-        )
+    sae_locations = get_all_local_autoencoders(local_sae_parent_dir)
 
+    sae_locations = general_utils.filter_keywords(
+        sae_locations,
+        exclude_keywords=exclude_keywords,
+        include_keywords=include_keywords,
+    )
+
+    if not sae_locations:
+        print(f"No SAE locations found or remaining after filtering in {local_sae_parent_dir}.")
+    else:
+        print(f"Filtered SAE locations to evaluate: {sae_locations}")
         run_evals(
-            repo_id=repo_id,
-            model_name=model_name,
+            local_sae_parent_dir=local_sae_parent_dir,
+            model_name=model_name_to_eval,
             sae_locations=sae_locations,
             llm_batch_size=llm_batch_size,
             llm_dtype=str_dtype,
@@ -482,5 +715,5 @@ if __name__ == "__main__":
             eval_types=eval_types,
             api_key=api_key,
             random_seed=RANDOM_SEED,
-            force_rerun=True
+            force_rerun=True,
         )
