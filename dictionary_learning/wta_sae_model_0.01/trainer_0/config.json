@@ -1,0 +1,31 @@
+{
+    "trainer": {
+        "trainer_class": "WTATrainer",
+        "dict_class": "WTASAE",
+        "lr": 0.000282842712474619,
+        "steps": 12207,
+        "auxk_alpha": 0.03125,
+        "seed": 42,
+        "activation_dim": 1024,
+        "dict_size": 8192,
+        "sparsity_rate": 0.01,
+        "device": "cuda",
+        "layer": 3,
+        "lm_name": "EleutherAI/pythia-410m-deduped",
+        "wandb_name": "WTATrainer-EleutherAI/pythia-410m-deduped-resid_post_layer_3-sparsity_0.01_trainer_0",
+        "submodule_name": "resid_post_layer_3",
+        "warmup_steps": 1000,
+        "decay_start": null,
+        "threshold_beta": 0.999,
+        "threshold_start_step": 1000
+    },
+    "buffer": {
+        "d_submodule": 1024,
+        "io": "out",
+        "n_ctxs": 1280,
+        "ctx_len": 128,
+        "refresh_batch_size": 512,
+        "out_batch_size": 8192,
+        "device": "cuda"
+    }
+}

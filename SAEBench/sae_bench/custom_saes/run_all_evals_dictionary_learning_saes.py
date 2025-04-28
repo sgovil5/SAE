@@ -62,8 +62,8 @@ output_folders = {
 
 TRAINER_LOADERS = {
     # "MatryoshkaBatchTopKTrainer": batch_topk_sae.load_dictionary_learning_matryoshka_batch_topk_sae,
-    # "BatchTopKTrainer": batch_topk_sae.load_dictionary_learning_batch_topk_sae,
-    # "TopKTrainer": topk_sae.load_dictionary_learning_topk_sae,
+    "BatchTopKTrainer": batch_topk_sae.load_dictionary_learning_batch_topk_sae,
+    "TopKTrainer": topk_sae.load_dictionary_learning_topk_sae,
     # "StandardTrainerAprilUpdate": relu_sae.load_dictionary_learning_relu_sae,
     # "StandardTrainer": relu_sae.load_dictionary_learning_relu_sae,
     # "PAnnealTrainer": relu_sae.load_dictionary_learning_relu_sae,
@@ -87,6 +87,8 @@ def get_all_local_autoencoders(local_sae_parent_dir: str) -> list[str]:
     for root, dirs, files in os.walk(local_sae_parent_dir):
         # Check if config.json exists in the current directory
         if "config.json" in files and "ae.pt" in files:
+            if "nolook.py" in files:
+                continue
             # Calculate the relative path from the parent directory
             relative_path = os.path.relpath(root, local_sae_parent_dir)
             # Handle the case where the SAE is directly in the parent directory
@@ -231,15 +233,17 @@ def load_dictionary_learning_sae(
         if k is None:
              raise ValueError(f"Could not determine 'k' for TopKTrainer from config: {config_file}")
         print(f"TopK Specific: k={k}")
+        layer_keys = ["layer"]
+        hook_layer = get_param(layer_keys)
         sae = topk_sae.TopKSAE(
              d_in=d_in,
              d_sae=d_sae,
              k=k,
-             l1_coefficient=l1_coefficient, # Check if TopKSAE uses this
+             model_name=model_name, # Use model name from config or arg
+             hook_layer=hook_layer,
              dtype=dtype,
              device=device,
              # use_bias=cfg_dict.get("use_bias", True)
-             use_bias=use_bias
         )
     elif trainer_class == "BatchTopKTrainer": # Add BatchTopK logic
          # k = cfg_dict.get("k")
@@ -247,15 +251,17 @@ def load_dictionary_learning_sae(
          if k is None:
               raise ValueError(f"Could not determine 'k' for BatchTopKTrainer from config: {config_file}")
          print(f"BatchTopK Specific: k={k}")
+         layer_keys = ["layer"]
+         hook_layer = get_param(layer_keys)
          sae = batch_topk_sae.BatchTopKSAE( # Assuming class name
               d_in=d_in,
               d_sae=d_sae,
               k=k,
-              l1_coefficient=l1_coefficient, # Check if BatchTopKSAE uses this
+              model_name=model_name, # Use model name from config or arg
+              hook_layer=hook_layer,
               dtype=dtype,
               device=device,
               # use_bias=cfg_dict.get("use_bias", True)
-              use_bias=use_bias
          )
     elif trainer_class == "JumpReluTrainer":
          # Add JumpRelu logic - check required params
@@ -661,7 +667,6 @@ if __name__ == "__main__":
         "scr",
         "tpp",
         "sparse_probing",
-        "ravel",
     ]
 
     if "autointerp" in eval_types:

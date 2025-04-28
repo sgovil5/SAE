@@ -32,7 +32,7 @@ num_tokens = 100_000_000
 
 # SAE parameters
 expansion_factor = 8
-k = 32  # Number of active features per sample
+k = 64  # Number of active features per sample
 steps = int(num_tokens / sae_batch_size)  # Total number of batches to train
 warmup_steps = 1000
 decay_start = None
